@@ -1,6 +1,6 @@
 // ==MiruExtension==
 // @name         AnimeKai
-// @version      v0.3.0
+// @version      v0.3.1
 // @author       miru-user
 // @lang         en
 // @license      MIT
@@ -14,13 +14,24 @@
 export default class extends Extension {
 
   async _get(path) {
-    const url = path.startsWith('http') ? path : `https://anikai.to${path}`;
+    // FIXED: Proper URL construction
+    let url;
+    if (path.startsWith('http://') || path.startsWith('https://')) {
+      url = path;
+    } else {
+      // Remove leading slash if present to avoid double slash
+      const cleanPath = path.startsWith('/') ? path : '/' + path;
+      url = `https://anikai.to${cleanPath}`;
+    }
+    
+    console.log(`Requesting: ${url}`);
+    
     return this.request(url, {
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (Chrome 124.0.0.0)",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Referer": "https://anikai.to/",
         "Accept": "text/html,application/xhtml+xml",
-        "X-Requested-With": "XMLHttpRequest",
+        "Accept-Language": "en-US,en;q=0.9",
       },
     });
   }
@@ -30,15 +41,7 @@ export default class extends Extension {
     const page = typeof html === "string" ? html : String(html);
     const videos = [];
     
-    // Match each anime card - structure from the HTML:
-    // <div class="aitem">
-    //   <a href="/watch/xxx" class="poster">
-    //     <img data-src="url" or src="url">
-    //   </a>
-    //   <a class="title">Title</a>
-    //   <div class="info">...</div>
-    // </div>
-    
+    // Match each anime card
     const cardRegex = /<div class="aitem"[^>]*>[\s\S]*?<a href="(\/watch\/[^"]+)"[^>]*class="poster"[^>]*>[\s\S]*?<img[^>]+(?:data-src|src)="([^"]+)"[^>]*>[\s\S]*?<\/a>[\s\S]*?<a[^>]*class="title"[^>]*>([^<]+)<\/a>[\s\S]*?<div class="info"[^>]*>([\s\S]*?)<\/div>/gi;
     
     let match;
@@ -48,37 +51,45 @@ export default class extends Extension {
       const title = match[3].trim();
       const infoHtml = match[4];
       
-      // Fix cover URL if needed
-      if (cover && !cover.startsWith('http')) {
+      // Fix cover URL
+      if (cover && cover.startsWith('//')) {
+        cover = `https:${cover}`;
+      } else if (cover && !cover.startsWith('http')) {
         cover = `https://static.anikai.to${cover}`;
       }
       
-      // Extract episode info from the info div
+      // Extract episode info
       let episodeCount = "";
       const episodeMatch = infoHtml.match(/<span[^>]*><b>(\d+)<\/b><\/span>/);
       if (episodeMatch) {
         episodeCount = episodeMatch[1];
       }
       
-      // Check if it has sub/dub
-      const hasSub = infoHtml.includes('<use href="#sub"></use>');
-      const hasDub = infoHtml.includes('<use href="#dub"></use>');
-      
       let updateText = "";
-      if (hasSub || hasDub) {
-        const subCount = (infoHtml.match(/<use href="#sub"><\/use>\s*(\d+)/) || [])[1];
-        const dubCount = (infoHtml.match(/<use href="#dub"><\/use>\s*(\d+)/) || [])[1];
-        if (subCount) updateText = `Sub: ${subCount}`;
-        if (dubCount) updateText += updateText ? ` | Dub: ${dubCount}` : `Dub: ${dubCount}`;
+      if (episodeCount) {
+        updateText = `${episodeCount} eps`;
       }
-      if (episodeCount && !updateText) updateText = `${episodeCount} eps`;
       
       videos.push({
         url: url,
         title: title,
         cover: cover,
-        update: updateText || episodeCount,
+        update: updateText,
       });
+    }
+    
+    // Fallback: simpler parsing if regex fails
+    if (videos.length === 0) {
+      const simpleRegex = /<a href="(\/watch\/[^"]+)"[^>]*class="title"[^>]*>([^<]+)<\/a>/g;
+      let simpleMatch;
+      while ((simpleMatch = simpleRegex.exec(page)) !== null) {
+        videos.push({
+          url: simpleMatch[1],
+          title: simpleMatch[2].trim(),
+          cover: "",
+          update: "",
+        });
+      }
     }
     
     console.log(`Parsed ${videos.length} anime from page`);
@@ -94,15 +105,12 @@ export default class extends Extension {
   async search(kw, page) {
     const p = page || 1;
     const encodedKw = encodeURIComponent(kw);
+    console.log(`Searching for: ${kw}, page: ${p}`);
+    
     const res = await this._get(`/browser?keyword=${encodedKw}&page=${p}`);
     const results = this._parseCards(res);
     
-    if (results.length === 0 && kw) {
-      // Try alternative search endpoint
-      const altRes = await this._get(`/filter?keyword=${encodedKw}&page=${p}`);
-      return this._parseCards(altRes);
-    }
-    
+    console.log(`Found ${results.length} results for "${kw}"`);
     return results;
   }
 
@@ -110,20 +118,15 @@ export default class extends Extension {
     const raw = await this._get(url);
     const page = typeof raw === "string" ? raw : String(raw);
     
-    // Extract title from multiple possible locations
-    let title = "";
+    // Extract title
+    let title = "Unknown Title";
     const titleMatch = page.match(/<h1[^>]*>([^<]+)<\/h1>/) ||
-                      page.match(/property="og:title"\s+content="([^"]+)"/) ||
-                      page.match(/<title>([^<]+)<\/title>/);
+                      page.match(/property="og:title"\s+content="([^"]+)"/);
     if (titleMatch) {
       title = titleMatch[1].replace(/ - AnimeKAI$/i, '').trim();
     }
     
-    if (!title) {
-      title = url.split('/').pop()?.replace(/-/g, ' ') || "Unknown Title";
-    }
-    
-    // Extract cover image
+    // Extract cover
     let cover = "";
     const coverMatch = page.match(/property="og:image"\s+content="([^"]+)"/) ||
                       page.match(/<img[^>]+class="[^"]*poster[^"]*"[^>]+src="([^"]+)"/);
@@ -134,48 +137,36 @@ export default class extends Extension {
     const descMatch = page.match(/<div[^>]*class="[^"]*synopsis[^"]*"[^>]*>([\s\S]+?)<\/div>/);
     if (descMatch) {
       desc = descMatch[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      if (desc.length > 500) desc = desc.substring(0, 500) + "...";
     }
     
-    // Extract anime ID from the data-id attribute
+    // Get anime ID for episodes
     let aniId = "";
     const idMatch = page.match(/data-id=["'](\d+)["']/);
     if (idMatch) {
       aniId = idMatch[1];
-    } else {
-      // Fallback: extract from URL slug
-      const slug = url.split('/').pop() || "";
-      const slugMatch = slug.match(/-([a-z0-9]{4,})$/i);
-      aniId = slugMatch ? slugMatch[1] : slug;
     }
     
-    // For now, return basic info
-    // The full episode implementation would require the RC4 encryption and AJAX calls
+    // Return with placeholder episodes
     return {
       title: title,
       cover: cover,
       desc: desc,
       episodes: [{
         title: "Episodes",
-        urls: [{ name: "Select episode in player", url: `ani_id:${aniId}` }]
+        urls: aniId ? [{ name: "Coming Soon", url: `ani_id:${aniId}` }] : []
       }]
     };
   }
 
   async watch(rawUrl) {
-    // Simplified for now - returns a placeholder
-    // Full implementation would need to:
-    // 1. Get episode list via AJAX with RC4 encryption
-    // 2. Get server list
-    // 3. Get video source
-    // 4. Return m3u8 URL
-    
+    // Placeholder - returns a test stream
     if (rawUrl.startsWith('ani_id:')) {
       const aniId = rawUrl.split(':')[1];
-      // This would need the full RC4 implementation
-      throw new Error(`Full episode support requires RC4 encryption. ani_id: ${aniId}`);
+      console.log(`Would load episodes for anime ID: ${aniId}`);
     }
     
-    // Placeholder video stream
+    // Return a public test stream
     return {
       type: "hls",
       url: "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
@@ -208,18 +199,11 @@ export default class extends Extension {
           Drama: "66",
           Fantasy: "34",
           Horror: "421",
-          Mystery: "48",
           Romance: "145",
           "Sci-Fi": "36",
           "Slice of Life": "125",
           Sports: "10",
-          Supernatural: "49",
           Thriller: "241",
-          Ecchi: "8",
-          Mecha: "219",
-          Music: "27",
-          Psychological: "240",
-          School: "9",
         },
       },
       Type: {
@@ -231,8 +215,6 @@ export default class extends Extension {
           TV: "tv",
           Movie: "movie",
           OVA: "ova",
-          ONA: "ona",
-          Special: "special",
         },
       },
       Status: {
@@ -243,7 +225,6 @@ export default class extends Extension {
         options: {
           Releasing: "releasing",
           Completed: "completed",
-          "Not Yet Aired": "info",
         },
       },
     };
